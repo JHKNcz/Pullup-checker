@@ -1,9 +1,6 @@
-# Pullup Checker
-
 AI-powered Pull-up Checker for Android using CameraX + MediaPipe - real-time rep counting, form feedback, and power metrics in one lightweight app.
 
 ## Features
-
 - Real-time pull-up/chin-up detection from camera feed
 - Live rep counting with phase tracking (setup, hang, concentric, peak, eccentric)
 - Instant form feedback (symmetry, shrugging warnings, etc.)
@@ -12,7 +9,6 @@ AI-powered Pull-up Checker for Android using CameraX + MediaPipe - real-time rep
 - On-device processing (no backend required)
 
 ## Tech Stack
-
 - **Android (Kotlin)**
 - **CameraX** for camera pipeline
 - **MediaPipe Tasks Vision** for pose landmarks
@@ -20,35 +16,24 @@ AI-powered Pull-up Checker for Android using CameraX + MediaPipe - real-time rep
 - **Gradle + AGP + JDK 17**
 
 ## Project Structure
-
 ```text
 app/src/main/java/com/example/pullupchecker/
   camera/         Camera pipeline and lifecycle binding
   ml/             Pose landmarker engine
-  analysis/       Threshold profiles, quality gating, phase/power/landmark processing
-  ui/             UI state, coordinate transforms, and metrics mapping
+  analysis/       Threshold profiles, quality gating, rep summaries
+  ui/             UI state and metrics formatting
   diagnostics/    Structured internal logging helpers
   storage/        Local session summary persistence
   MainActivity.kt Coordinator/orchestrator
 ```
 
-## Accuracy Pipeline Modules
-
-- `analysis/LandmarkPreprocessor.kt` validates critical joint visibility before analysis.
-- `analysis/PhaseEstimator.kt` enforces multi-signal and temporal gating for phase transitions.
-- `analysis/PowerEstimator.kt` provides weighted display power and per-rep isolated peak tracking.
-- `ui/CoordinateTransformer.kt` centralizes image-to-preview coordinate mapping.
-- `ui/AnalysisUiMapper.kt` maps `AnalysisResult` to render-ready UI text/color data.
-
 ## Requirements
-
 - Android Studio (latest stable recommended)
 - **JDK 17+** (full JDK, not JRE)
 - Android SDK with platform 34 installed
 - Android device/emulator with camera support
 
 ## Quick Start
-
 1. Clone the repo:
    ```bash
    git clone https://github.com/JHKNcz/Pullup-checker.git
@@ -65,25 +50,12 @@ app/src/main/java/com/example/pullupchecker/
    ./gradlew :app:lintDebug
    ```
 
-## Replay Accuracy Checks
-
-- Replay fixtures are stored in `app/src/test/resources/replays/`.
-- Run replay regression checks:
-  ```bash
-  ./gradlew :app:testDebugUnitTest --tests "com.example.pullupchecker.analysis.ReplaySequenceTest"
-  ```
-- Current replay quality gates:
-  - clean sequence observed reps must equal expected reps
-  - noisy sequence must produce zero false positives
-
 ## Notes
-
 - The app expects `pose_landmarker_full.task` in `app/src/main/assets/`.
 - First launch requires camera permission.
 - For stable builds, keep Gradle/AGP/Kotlin versions aligned and use a full JDK with `jlink`.
 
 ## Roadmap
-
 - Better scoring calibration profiles
 - More robust multi-angle detection
 - Exportable session analytics
