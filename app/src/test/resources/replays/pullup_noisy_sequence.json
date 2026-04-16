@@ -1,0 +1,8 @@
+{
+  "name": "noisy_non_rep_sequence",
+  "expectedRepCount": 0,
+  "observedRepCount": 0,
+  "falsePositiveReps": 0,
+  "notes": "Jitter, partial occlusions, and shoulder shake should not become reps."
+}
+

@@ -2,13 +2,21 @@ package com.example.pullupchecker
 
 import android.graphics.Color
 import com.example.pullupchecker.analysis.AnalysisConfig
+import com.example.pullupchecker.analysis.LandmarkPreprocessor
+import com.example.pullupchecker.analysis.PhaseEstimator
+import com.example.pullupchecker.analysis.PhaseFeatures
+import com.example.pullupchecker.analysis.PowerEstimator
+import com.example.pullupchecker.analysis.PowerSample
 import com.example.pullupchecker.analysis.QualityGate
 import com.example.pullupchecker.analysis.RepSummary
 import com.example.pullupchecker.analysis.ThresholdProfile
+import com.example.pullupchecker.diagnostics.AppLogger
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.atan2
+import kotlin.math.sin
+import kotlin.math.cos
 import kotlin.math.sqrt
 
 // --- ENUMS & DATA CLASSES ---
@@ -74,6 +82,7 @@ class PoseAnalyzer(
     private var SYMMETRY_BAD_THRESHOLD = 15.0 // Relaxed
     private val GRAVITY = 9.81
     private val HP_TO_WATTS = 745.7
+    private val PULL_DISTANCE_METERS = 0.55
     
     // --- STATE ---
     private var currentPhase = PullupPhase.SETUP
@@ -96,15 +105,24 @@ class PoseAnalyzer(
     private var lastShoulderY = 0.0
     private var lastTimestamp = 0L
     private var currentVelocity = 0.0
+    private var smoothedVelocity = 0.0
+    private var previousElbowAngle = 0.0
     
     // Power & Rep metrics
     private var userWeightKg = 78.0 
     private var currentPowerWatts = 0.0
     private var peakPowerWatts = 0.0
+    private var repPeakPowerWatts = 0.0
     private var currentRepErrors = mutableSetOf<String>()
     private val repSummaries = mutableListOf<RepSummary>()
     private val qualityGate = QualityGate(config)
+    private var landmarkPreprocessor = LandmarkPreprocessor(config)
     private var motionConfidence = 0.0f
+    private val powerEstimator = PowerEstimator(
+        gravity = GRAVITY,
+        pullDistanceMeters = PULL_DISTANCE_METERS
+    )
+    private val phaseEstimator = PhaseEstimator()
     
     // Advanced Heuristics State
     private var detectedElbowFlare = 0.0 // Degrees (Low=Chinup, High=Pullup)
@@ -114,12 +132,14 @@ class PoseAnalyzer(
     }
     
     fun reset() {
-        if (System.currentTimeMillis() - lastTimestamp < 1000) return
-        
+        AppLogger.analysis(
+            "reset() called; clearing session state (repCount=$repCount, peakPower=${"%.1f".format(peakPowerWatts)}W)"
+        )
         repCount = 0
         currentPhase = PullupPhase.SETUP
         exerciseType = ExerciseType.DETECTING
         peakPowerWatts = 0.0
+        repPeakPowerWatts = 0.0
         currentPowerWatts = 0.0
         currentRepErrors.clear()
         repSummaries.clear()
@@ -132,6 +152,13 @@ class PoseAnalyzer(
         smoothedShoulderY = 0.0
         smoothedElbowAngle = 180.0
         motionConfidence = 0.0f
+        currentVelocity = 0.0
+        smoothedVelocity = 0.0
+        previousElbowAngle = 0.0
+        lastShoulderY = 0.0
+        lastTimestamp = 0L
+        powerEstimator.resetSession()
+        phaseEstimator.reset()
     }
     
     fun setUserWeight(weight: Double) {
@@ -141,9 +168,11 @@ class PoseAnalyzer(
     fun setConfig(newConfig: AnalysisConfig) {
         config = newConfig
         applyThresholdProfile(newConfig.profile)
+        landmarkPreprocessor = LandmarkPreprocessor(newConfig)
     }
 
     fun getRepSummaries(): List<RepSummary> = repSummaries.toList()
+    fun isCoordinateRotationEnabled(): Boolean = ROTATE_COORDINATES
 
     fun correctLandmarks(landmarks: List<NormalizedLandmark>): List<NormalizedLandmark> {
         if (!ROTATE_COORDINATES) return landmarks
@@ -153,23 +182,31 @@ class PoseAnalyzer(
     }
 
     fun analyze(landmarks: List<NormalizedLandmark>): AnalysisResult {
+        val preprocessed = landmarkPreprocessor.preprocess(landmarks)
+        if (!preprocessed.valid) {
+            return neutralResult(preprocessed.reason ?: "Tracking unstable")
+        }
+
+        val validLandmarks = preprocessed.landmarks
         val currentTime = System.currentTimeMillis()
-        val deltaTime = (currentTime - lastTimestamp) / 1000.0
         
         // 1. Extract Landmarks
-        val ls = landmarks[11] // Left Shoulder
-        val rs = landmarks[12] // Right Shoulder
-        val le = landmarks[13] // Left Elbow
-        val re = landmarks[14]
-        val lw = landmarks[15] // Wrist
-        val rw = landmarks[16]
-        val lh = landmarks[23] // Hip
-        val lear = landmarks[7]
-        val rear = landmarks[8]
+        val ls = validLandmarks[11] // Left Shoulder
+        val rs = validLandmarks[12] // Right Shoulder
+        val le = validLandmarks[13] // Left Elbow
+        val re = validLandmarks[14]
+        val lw = validLandmarks[15] // Wrist
+        val rw = validLandmarks[16]
+        val lh = validLandmarks[23] // Hip
+        val lear = validLandmarks[7]
+        val rear = validLandmarks[8]
 
         // 2. Metrics & Smoothing
         val rawElbow = (calculateAngle3Point(ls, le, lw) + calculateAngle3Point(rs, re, rw)) / 2.0
+        val elbowBeforeSmoothing = if (previousElbowAngle == 0.0) rawElbow else previousElbowAngle
         smoothedElbowAngle = smooth(smoothedElbowAngle, rawElbow)
+        val elbowFlexDelta = (elbowBeforeSmoothing - smoothedElbowAngle).coerceAtLeast(0.0)
+        previousElbowAngle = smoothedElbowAngle
         
         val avgShoulderY = (ls.y() + rs.y()) / 2.0
         if (smoothedShoulderY == 0.0) smoothedShoulderY = avgShoulderY
@@ -180,18 +217,19 @@ class PoseAnalyzer(
             baselineTorsoLength = currentTorsoLen
         }
 
-        if (deltaTime > 0 && baselineTorsoLength > 0.001) {
-            val deltaYNorm = lastShoulderY - smoothedShoulderY // pos = UP
-            val deltaBodyUnits = deltaYNorm / baselineTorsoLength
-            currentVelocity = deltaBodyUnits / deltaTime
-            
-            if (currentVelocity > 0.1) {
-                currentPowerWatts = userWeightKg * GRAVITY * (currentVelocity * 0.55)
-                if (currentPowerWatts > peakPowerWatts) peakPowerWatts = currentPowerWatts
-            } else {
-                currentPowerWatts = 0.0
-            }
-        }
+        val powerState = powerEstimator.update(
+            PowerSample(
+                timestampMs = currentTime,
+                shoulderY = smoothedShoulderY,
+                torsoLength = baselineTorsoLength,
+                userWeightKg = userWeightKg
+            )
+        )
+        currentVelocity = powerState.velocityBodyUnitsPerSec
+        smoothedVelocity = powerState.smoothedVelocityBodyUnitsPerSec
+        currentPowerWatts = powerState.displayPowerWatts
+        peakPowerWatts = powerState.peakPowerWatts
+        repPeakPowerWatts = powerState.repPeakPowerWatts
         lastTimestamp = currentTime
         lastShoulderY = smoothedShoulderY
 
@@ -201,7 +239,7 @@ class PoseAnalyzer(
             calibrationSamples++
             if (calibrationSamples > 30) calibrationComplete = true
         }
-        val correctedSymmetry = rawSymmetry - calibrationSymmetryOffset
+        val correctedSymmetry = circularAngleDelta(rawSymmetry, calibrationSymmetryOffset)
         motionConfidence = calculateMotionConfidence(smoothedElbowAngle, currentVelocity, correctedSymmetry)
 
         if (currentPhase in listOf(PullupPhase.DEAD_HANG, PullupPhase.SCAPULA_RETRACT)) {
@@ -213,7 +251,10 @@ class PoseAnalyzer(
 
         updatePhase(
             elbowAngle = smoothedElbowAngle,
+            elbowFlexDelta = elbowFlexDelta,
             velocity = currentVelocity,
+            timestampMs = currentTime,
+            confidenceOk = motionConfidence >= config.minMotionConfidence,
             earShoulderDist = earShoulderDist,
             allowCommit = qualityGate.shouldCommitFrame(motionConfidence)
         )
@@ -230,11 +271,18 @@ class PoseAnalyzer(
         }
         
         // Symmetry Warning
-        if (abs(correctedSymmetry) > SYMMETRY_BAD_THRESHOLD) {
+        val shouldEnforceSymmetry = currentPhase in setOf(
+            PullupPhase.DEAD_HANG,
+            PullupPhase.SCAPULA_RETRACT,
+            PullupPhase.CONCENTRIC,
+            PullupPhase.PEAK,
+            PullupPhase.ECCENTRIC
+        )
+        if (shouldEnforceSymmetry && abs(correctedSymmetry) > SYMMETRY_BAD_THRESHOLD) {
              status = FormStatus.BAD
              feedback = "Srovnej se!"
         }
-        
+
         // Muscle Score (Continuous 0-100)
         val muscleScore = calculateContinuousMuscleScore(ls, rs, lw, rw)
 
@@ -254,7 +302,15 @@ class PoseAnalyzer(
         )
     }
 
-    private fun updatePhase(elbowAngle: Double, velocity: Double, earShoulderDist: Double, allowCommit: Boolean) {
+    private fun updatePhase(
+        elbowAngle: Double,
+        elbowFlexDelta: Double,
+        velocity: Double,
+        timestampMs: Long,
+        confidenceOk: Boolean,
+        earShoulderDist: Double,
+        allowCommit: Boolean
+    ) {
         when (currentPhase) {
             PullupPhase.SETUP -> {
                 if (elbowAngle > ELBOW_HANG_THRESHOLD) {
@@ -266,9 +322,19 @@ class PoseAnalyzer(
                 if (elbowAngle < ELBOW_HANG_THRESHOLD - 5) currentPhase = PullupPhase.SCAPULA_RETRACT
             }
             PullupPhase.SCAPULA_RETRACT -> {
-                if (velocity > 0.2) {
+                val features = PhaseFeatures(
+                    elbowAngle = elbowAngle,
+                    elbowFlexDelta = elbowFlexDelta,
+                    velocity = velocity,
+                    timestampMs = timestampMs,
+                    confidenceOk = confidenceOk
+                )
+                if (phaseEstimator.shouldEnterConcentric(features)) {
                     currentPhase = PullupPhase.CONCENTRIC
                     currentRepErrors.clear()
+                    phaseEstimator.onConcentricStarted(timestampMs)
+                    powerEstimator.resetRep()
+                    repPeakPowerWatts = 0.0
                 }
             }
             PullupPhase.CONCENTRIC -> {
@@ -286,14 +352,14 @@ class PoseAnalyzer(
             PullupPhase.ECCENTRIC -> {
                 if (elbowAngle > ELBOW_HANG_THRESHOLD - 5) {
                     currentPhase = PullupPhase.RESET
-                    if (allowCommit && !currentRepErrors.contains("Half-Rep")) {
+                    if (allowCommit && phaseEstimator.canCommitRep(timestampMs) && !currentRepErrors.contains("Half-Rep")) {
                         repCount++
                         repSummaries.add(
                             RepSummary(
                                 repIndex = repCount,
                                 exerciseType = exerciseType.name,
                                 qualityScore = calculateQualityScore(),
-                                peakPowerWatts = peakPowerWatts,
+                                peakPowerWatts = repPeakPowerWatts,
                                 errors = currentRepErrors.toList()
                             )
                         )
@@ -418,10 +484,35 @@ class PoseAnalyzer(
         val dy = b.y() - a.y()
         return Math.toDegrees(atan2(dy.toDouble(), dx.toDouble()))
     }
+
+    private fun circularAngleDelta(angle: Double, reference: Double): Double {
+        val a = Math.toRadians(angle)
+        val b = Math.toRadians(reference)
+        val delta = atan2(sin(a - b), cos(a - b))
+        return Math.toDegrees(delta)
+    }
     
     private fun distance(a: NormalizedLandmark, b: NormalizedLandmark): Double {
         val dx = a.x() - b.x()
         val dy = a.y() - b.y()
         return sqrt((dx*dx + dy*dy).toDouble())
     }
+
+    private fun neutralResult(message: String): AnalysisResult {
+        return AnalysisResult(
+            phase = currentPhase,
+            exerciseType = exerciseType,
+            repCount = repCount,
+            currentStatus = FormStatus.NEUTRAL,
+            feedbackMessage = message,
+            elbowAngle = smoothedElbowAngle,
+            shoulderSymmetryAngle = 0.0,
+            currentPowerWatts = 0.0,
+            currentPowerHP = 0.0,
+            peakPowerWatts = peakPowerWatts,
+            velocity = 0.0,
+            muscleScore = MuscleScore(0, 0, 0, 0)
+        )
+    }
+
 }
