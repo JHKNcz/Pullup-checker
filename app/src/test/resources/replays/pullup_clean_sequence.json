@@ -1,0 +1,8 @@
+{
+  "name": "clean_pullup_sequence",
+  "expectedRepCount": 5,
+  "observedRepCount": 5,
+  "falsePositiveReps": 0,
+  "notes": "Stable landmarks, full ROM, no symmetry warnings."
+}
+

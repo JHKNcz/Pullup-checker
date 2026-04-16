@@ -35,4 +35,19 @@ class QualityGateTest {
         assertFalse(gate.shouldCommitFrame(0.7f))
         assertTrue(gate.shouldCommitFrame(0.7f))
     }
+
+    @Test
+    fun shouldRemainCommittedWhileConfidenceStaysHigh() {
+        val gate = QualityGate(
+            AnalysisConfig(
+                minMotionConfidence = 0.4f,
+                minStableFramesForRepCommit = 2
+            )
+        )
+
+        assertFalse(gate.shouldCommitFrame(0.5f))
+        assertTrue(gate.shouldCommitFrame(0.5f))
+        assertTrue(gate.shouldCommitFrame(0.6f))
+        assertTrue(gate.shouldCommitFrame(0.8f))
+    }
 }

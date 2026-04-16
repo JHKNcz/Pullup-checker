@@ -21,6 +21,7 @@ import com.example.pullupchecker.ml.EngineState
 import com.example.pullupchecker.ml.PoseLandmarkerEngine
 import com.example.pullupchecker.storage.SessionStore
 import com.example.pullupchecker.storage.SessionSummary
+import com.example.pullupchecker.ui.AnalysisUiMapper
 import com.example.pullupchecker.ui.MetricsFormatter
 import com.example.pullupchecker.ui.ScreenState
 import java.util.concurrent.ExecutorService
@@ -37,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraPipeline: CameraPipeline
     private lateinit var sessionStore: SessionStore
     private var screenState = ScreenState()
+    @Volatile private var lastFrameWidth = 1
+    @Volatile private var lastFrameHeight = 1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,8 +61,14 @@ class MainActivity : AppCompatActivity() {
 
         viewBinding.recordButton.text = "Reset session"
         viewBinding.recordButton.setOnClickListener {
+            AppLogger.ui("Reset session button tapped")
             poseAnalyzer.reset()
-            viewBinding.sessionHistoryText.text = "Session reset"
+            viewBinding.sessionHistoryText.text = "Session history: no reps yet"
+            viewBinding.powerText.text = "Power 0 W"
+            viewBinding.powerHpText.text = "HP 0.00"
+            viewBinding.peakPowerText.text = "Peak 0 W | Vel 0.00"
+            viewBinding.metricsText.text = "Ready"
+            viewBinding.statusText.text = "Session reset"
             Toast.makeText(this, "Session reset", Toast.LENGTH_SHORT).show()
         }
         viewBinding.recordButton.setOnLongClickListener {
@@ -94,15 +103,19 @@ class MainActivity : AppCompatActivity() {
                         viewBinding.overlay.setResults(
                             landmarks,
                             analysisResult.elbowAngle,
-                            analysisResult.exerciseType
+                            analysisResult.exerciseType,
+                            if (poseAnalyzer.isCoordinateRotationEnabled()) lastFrameHeight else lastFrameWidth,
+                            if (poseAnalyzer.isCoordinateRotationEnabled()) lastFrameWidth else lastFrameHeight
                         )
                         viewBinding.overlay.updateStatus(analysisResult.currentStatus)
 
-                        viewBinding.metricsText.text = MetricsFormatter.formatMetrics(analysisResult)
+                        val uiModel = AnalysisUiMapper.map(analysisResult)
+                        viewBinding.metricsText.text = uiModel.metricsText
                         viewBinding.metricsText.textSize = 18f
-                        viewBinding.metricsText.setTextColor(analysisResult.currentStatus.color)
+                        viewBinding.metricsText.setTextColor(uiModel.statusColor)
+                        viewBinding.statusText.text = uiModel.statusText
 
-                        viewBinding.powerText.text = "Power %.0f W".format(analysisResult.currentPowerWatts)
+                        viewBinding.powerText.text = "Power %.1f W".format(analysisResult.currentPowerWatts)
                         viewBinding.powerHpText.text = "HP %.2f".format(analysisResult.currentPowerHP)
                         viewBinding.peakPowerText.text = "Peak %.0f W | Vel %.2f".format(
                             analysisResult.peakPowerWatts,
@@ -155,6 +168,8 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val bitmap = imageProxy.toBitmap()
+            lastFrameWidth = bitmap.width
+            lastFrameHeight = bitmap.height
             poseEngine.detect(bitmap, System.currentTimeMillis())
         } catch (t: Throwable) {
             AppLogger.analysis("Failed to process image frame", t)
